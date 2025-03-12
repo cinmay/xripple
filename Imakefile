@@ -1,0 +1,34 @@
+
+#####  C++ COMPILER
+#CXX         = g++
+
+#####  C COMPILER
+#CC          = gcc
+
+#######################################################################
+
+.SUFFIXES: .C $(SUFFIXES)
+
+SRCS = xrp.c
+
+CCOPTIONS = -O9
+
+LOCAL_LIBRARIES = $(XLIB)
+
+EXTRA_LOAD_FLAGS= -lm
+
+OBJS = $(SRCS:.c=.o) 
+
+xripple: $(OBJS) $(DEPLIBS)
+	$(RM) $@
+	$(CC) -o $@ $(OBJS) $(LDOPTIONS) $(LOCAL_LIBRARIES) $(LDLIBS) $(EXTRA_LOAD_FLAGS)
+
+DependTarget()
+CleanTarget()
+
+.c.o:
+	$(CC) $(CFLAGS) -c $< -o $@
+
+
+clean::
+	$(RM) xripple
