@@ -1,6 +1,12 @@
 # Xripple
 
 This is the Xripple program originally written by Carsten Haitzler The Rasterman.
+It draws ripples on the screen using X11 and mirrors menu's and windows in the ripples.
+
+## Prerequisites
+
+It draws on the root window, so it only works with window managers that use the root window for the desktop.
+It's been tested with Fluxbox and AwesomeVM.
 
 ## Basic compilation
 
