@@ -4,6 +4,7 @@
 /*****************************************************************************/
 
 #include <stdio.h>
+#include <stdlib.h>    // for exit and free
 #include <unistd.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -27,52 +28,51 @@ int height;
 int waterh;
 int depth;
 
-OpenWindow(int h)
+// Forward declarations
+int GetWinWidth();
+int GetWinHeight();
+
+void OpenWindow(int h)
 {
   XGCValues gcvals;
   int i;
 
-  disp=XOpenDisplay(NULL);
-  if (disp)
-    {
-      Root=DefaultRootWindow(disp);
-      scr=DefaultScreen(disp);
-      blk=BlackPixel(disp,scr);
-      wht=WhitePixel(disp,scr);
-      vis=DefaultVisual(disp,scr);
-      depth=DefaultDepth(disp,scr);
-      gc=XCreateGC(disp,Root,(unsigned long)0,&gcvals);
-      XSetForeground(disp,gc,blk);
-      XSetBackground(disp,gc,wht);
-      width=GetWinWidth();
-      height=GetWinHeight();
-      pmap=XCreatePixmap(disp,Root,width,h,depth);
-      pmap_buff=XCreatePixmap(disp,Root,width,h*2,depth);
-    }
-  else
-    {
+  disp = XOpenDisplay(NULL);
+  if (disp) {
+      Root = DefaultRootWindow(disp);
+      scr = DefaultScreen(disp);
+      blk = BlackPixel(disp, scr);
+      wht = WhitePixel(disp, scr);
+      vis = DefaultVisual(disp, scr);
+      depth = DefaultDepth(disp, scr);
+      gc = XCreateGC(disp, Root, 0, &gcvals);
+      XSetForeground(disp, gc, blk);
+      XSetBackground(disp, gc, wht);
+      width = GetWinWidth();
+      height = GetWinHeight();
+      pmap = XCreatePixmap(disp, Root, width, h, depth);
+      pmap_buff = XCreatePixmap(disp, Root, width, h * 2, depth);
+  } else {
       printf("Cannot open display\n");
       exit(1);
-    }
+  }
 }
 
 int GetWinWidth()
 {
   XWindowAttributes wa;
-  
-  XGetWindowAttributes(disp,Root,&wa);
+  XGetWindowAttributes(disp, Root, &wa);
   return wa.width;
 }
 
 int GetWinHeight()
 {
   XWindowAttributes wa;
-  
-  XGetWindowAttributes(disp,Root,&wa);
+  XGetWindowAttributes(disp, Root, &wa);
   return wa.height;
 }
 
-doit()
+void doit()
 {
   int y;
   int yy;
@@ -85,46 +85,43 @@ doit()
   double p;
   int i;
 
-  inch=0;
-  incv=0;
-  i=0;
+  inch = 0;
+  incv = 0;
+  i = 0;
 
-  for(;;)
-    {
-      xim=XGetImage(disp,Root,0,(height-(waterh*3))+i,width,1,0xffffffff,ZPixmap);
-      XPutImage(disp,pmap_buff,gc,xim,0,0,0,i++,width,1);
+  for (;;) {
+      xim = XGetImage(disp, Root, 0, (height - (waterh * 3)) + i, width, 1, 0xffffffff, ZPixmap);
+      XPutImage(disp, pmap_buff, gc, xim, 0, 0, 0, i++, width, 1);
       if (xim->data) free(xim->data);
       if (xim->obdata) free(xim->obdata);
       if (xim) free(xim);
-      i=i%(waterh*2);
-      incv+=0.09;
-      if (incv>(M_PI_2*4))
-	{
-	  incv=0;
-	}
-      inch+=0.06;
-      if (inch>(M_PI_2*4))
-	{
-	  inch=0;
-	}
-      for (y=0;y<waterh;y++)
-	{
-	  p=(((double)(waterh-y))/((double)waterh));
-	  a=p*p*48+incv;
-	  yoff=y+(int)(sin(a)*7)+1;
-	  yy=(waterh*2)-yoff;
-	  aa=p*p*64+inch;
-	  off=(int)(sin(aa)*10*(1-p));
-	  XCopyArea(disp,pmap_buff,pmap,gc,0,yy,width,1,off,y);
-	}
-      XCopyArea(disp,pmap,Root,gc,0,0,width,waterh,0,height-waterh);
-      XSync(disp,0xff);
-    }
+      i = i % (waterh * 2);
+      incv += 0.09;
+      if (incv > (M_PI_2 * 4)) {
+          incv = 0;
+      }
+      inch += 0.06;
+      if (inch > (M_PI_2 * 4)) {
+          inch = 0;
+      }
+      for (y = 0; y < waterh; y++) {
+          p = ((double)(waterh - y)) / ((double)waterh);
+          a = p * p * 48 + incv;
+          yoff = y + (int)(sin(a) * 7) + 1;
+          yy = (waterh * 2) - yoff;
+          aa = p * p * 64 + inch;
+          off = (int)(sin(aa) * 10 * (1 - p));
+          XCopyArea(disp, pmap_buff, pmap, gc, 0, yy, width, 1, off, y);
+      }
+      XCopyArea(disp, pmap, Root, gc, 0, 0, width, waterh, 0, height - waterh);
+      XSync(disp, False);
+  }
 }
 
-main(int argc, char **argv)
+int main(int argc, char **argv)
 {  
-  waterh=64;
+  waterh = 255;
   OpenWindow(waterh);
   doit();
+  return 0;
 }
