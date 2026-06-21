@@ -17,9 +17,9 @@ The first implementation is a standalone Hyprland/Wayland client:
    exclusive zone and an empty input region.
 4. Before the first visible frame, prefill the two-water-height source ring with
    one screencopy of the whole source band above the water.
-5. After every later frame callback, request a screencopy of one scanline from
+5. After every later frame callback, request a configurable chunk of rows from
    the same source band.
-6. Store captured scanlines in the ring buffer.
+6. Store captured rows in the ring buffer.
 7. Render the ripple strip into a double-buffered SHM surface.
 
 This keeps the app layered over the existing wallpaper while staying below
@@ -33,10 +33,10 @@ version into the root window. The closest standalone Wayland equivalent is:
 - capture a small region of the final output
 - draw the distorted result into a layer surface
 
-The startup prefill avoids a black warm-up band. After that, capturing only one
-scanline per frame keeps bandwidth low. At 3840 pixels wide, one XRGB scanline
-is about 15 KiB. The larger cost is rendering and submitting the water strip,
-roughly:
+The startup prefill avoids a black warm-up band. After that, the default capture
+chunk is 32 rows per update. At 3840 pixels wide, one XRGB scanline is about
+15 KiB, so 32 rows is about 480 KiB per capture. The larger recurring cost may
+still be rendering and submitting the water strip, roughly:
 
 ```text
 3840 * 255 * 4 * 60 = ~235 MiB/s
@@ -66,6 +66,7 @@ The current prototype should answer whether that cost is necessary.
 ## Immediate Benchmark Questions
 
 - Does one-row screencopy complete reliably at 60Hz?
+- How do 16-row, 32-row, and full-band capture compare?
 - What is average and worst-case render time for a 4K-wide 255px water band?
 - Does CPU usage stay acceptable at idle?
 - Does the layer ordering correctly place the effect above wallpaper and below

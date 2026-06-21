@@ -24,6 +24,7 @@
 #endif
 
 #define DEFAULT_WATER_HEIGHT 255
+#define DEFAULT_CAPTURE_ROWS 32
 #define RIPPLE_VERTICAL_SPEED 0.09
 #define RIPPLE_HORIZONTAL_SPEED 0.06
 #define RIPPLE_VERTICAL_PERIOD 48.0
@@ -35,7 +36,7 @@ struct app_state;
 struct output_state;
 
 enum capture_kind {
-  CAPTURE_KIND_SCANLINE,
+  CAPTURE_KIND_UPDATE,
   CAPTURE_KIND_PREFILL,
 };
 
@@ -100,6 +101,7 @@ struct output_state {
   uint64_t frames_rendered;
   uint64_t captures_completed;
   uint64_t captures_failed;
+  uint64_t source_rows_captured;
   uint64_t dropped_frames;
   uint64_t total_render_ns;
   uint64_t total_capture_ns;
@@ -119,6 +121,7 @@ struct app_state {
   struct output_state *outputs;
 
   int requested_water_height;
+  int requested_capture_rows;
   uint64_t max_frames;
   uint64_t total_frames_rendered;
   bool verbose;
@@ -190,17 +193,29 @@ static bool parse_positive_u64(const char *text, uint64_t *out_value)
   return true;
 }
 
+static bool parse_capture_rows(const char *text, int *out_value)
+{
+  if (strcmp(text, "full") == 0) {
+    *out_value = 0;
+    return true;
+  }
+
+  return parse_positive_int(text, out_value);
+}
+
 static void print_usage(const char *program_name)
 {
   fprintf(stderr,
-          "usage: %s [--water-height N] [--max-frames N] [--benchmark] [--verbose]\n"
+          "usage: %s [--water-height N] [--capture-rows N|full] [--max-frames N] [--benchmark] [--verbose]\n"
           "\n"
           "  --water-height N   ripple band height in logical pixels, default %d\n"
+          "  --capture-rows N   source rows captured per update, default %d, or full\n"
           "  --max-frames N     exit after N rendered frames across all outputs\n"
           "  --benchmark        print benchmark stats on exit\n"
           "  --verbose          print setup and diagnostic messages\n",
           program_name,
-          DEFAULT_WATER_HEIGHT);
+          DEFAULT_WATER_HEIGHT,
+          DEFAULT_CAPTURE_ROWS);
 }
 
 static bool parse_arguments(struct app_state *app, int argc, char **argv)
@@ -209,6 +224,11 @@ static bool parse_arguments(struct app_state *app, int argc, char **argv)
     if (strcmp(argv[index], "--water-height") == 0) {
       if (++index >= argc || !parse_positive_int(argv[index], &app->requested_water_height)) {
         fprintf(stderr, "invalid --water-height value\n");
+        return false;
+      }
+    } else if (strcmp(argv[index], "--capture-rows") == 0) {
+      if (++index >= argc || !parse_capture_rows(argv[index], &app->requested_capture_rows)) {
+        fprintf(stderr, "invalid --capture-rows value\n");
         return false;
       }
     } else if (strcmp(argv[index], "--max-frames") == 0) {
@@ -551,6 +571,15 @@ static bool capture_format_is_supported(uint32_t format)
   return format == WL_SHM_FORMAT_XRGB8888 || format == WL_SHM_FORMAT_ARGB8888;
 }
 
+static int configured_capture_rows(struct output_state *output, int source_height)
+{
+  int requested_rows = output->app->requested_capture_rows;
+  if (requested_rows <= 0 || requested_rows > source_height) {
+    return source_height;
+  }
+  return requested_rows;
+}
+
 static void copy_row_to_ring(struct output_state *output,
                              int destination_row,
                              const uint32_t *source_row,
@@ -603,10 +632,21 @@ static void copy_capture_to_ring(struct capture_frame *capture)
     return;
   }
 
-  uint8_t *source_bytes = capture->buffer.data;
-  copy_row_to_ring(output, capture->ring_row_index, (const uint32_t *)source_bytes, capture->width);
+  int rows_to_copy = capture->height;
+  int rows_until_ring_end = output->ring_row_count - capture->ring_row_index;
+  if (rows_to_copy > rows_until_ring_end) {
+    rows_to_copy = rows_until_ring_end;
+  }
 
-  output->capture_row_index = (output->capture_row_index + 1) % output->ring_row_count;
+  for (int row = 0; row < rows_to_copy; row++) {
+    uint8_t *source_bytes = (uint8_t *)capture->buffer.data + (size_t)row * (size_t)capture->buffer.stride;
+    copy_row_to_ring(output,
+                     capture->ring_row_index + row,
+                     (const uint32_t *)source_bytes,
+                     capture->width);
+  }
+
+  output->capture_row_index = (capture->ring_row_index + rows_to_copy) % output->ring_row_count;
 }
 
 static void start_capture_copy(struct capture_frame *capture)
@@ -686,6 +726,7 @@ static void capture_handle_ready(void *data,
   struct capture_frame *capture = data;
   struct output_state *output = capture->output;
   output->captures_completed++;
+  output->source_rows_captured += (uint64_t)capture->height;
   output->total_capture_ns += elapsed_ns_since(capture->started_at);
   output->capture_in_flight = false;
 
@@ -862,15 +903,29 @@ static void request_capture(struct output_state *output)
   }
 
   int ring_row_index = output->capture_row_index;
-  int source_row = source_top + (ring_row_index % source_height);
+  int source_offset = ring_row_index % source_height;
+  int source_row = source_top + source_offset;
   source_row = clamp_int(source_row, 0, logical_height - 1);
 
+  int capture_height = configured_capture_rows(output, source_height);
+  int rows_until_source_end = source_height - source_offset;
+  int rows_until_ring_end = output->ring_row_count - ring_row_index;
+  if (capture_height > rows_until_source_end) {
+    capture_height = rows_until_source_end;
+  }
+  if (capture_height > rows_until_ring_end) {
+    capture_height = rows_until_ring_end;
+  }
+  if (capture_height <= 0) {
+    capture_height = 1;
+  }
+
   if (!begin_capture_region(output,
-                            CAPTURE_KIND_SCANLINE,
+                            CAPTURE_KIND_UPDATE,
                             ring_row_index,
                             source_row,
                             capture_width,
-                            1)) {
+                            capture_height)) {
     render_ripple(output);
   }
 }
@@ -1083,6 +1138,7 @@ static void print_stats(struct app_state *app)
   uint64_t total_frames = 0;
   uint64_t total_captures = 0;
   uint64_t total_failed = 0;
+  uint64_t total_source_rows = 0;
   uint64_t total_dropped = 0;
   uint64_t total_render_ns = 0;
   uint64_t total_capture_ns = 0;
@@ -1091,6 +1147,7 @@ static void print_stats(struct app_state *app)
     total_frames += output->frames_rendered;
     total_captures += output->captures_completed;
     total_failed += output->captures_failed;
+    total_source_rows += output->source_rows_captured;
     total_dropped += output->dropped_frames;
     total_render_ns += output->total_render_ns;
     total_capture_ns += output->total_capture_ns;
@@ -1103,15 +1160,26 @@ static void print_stats(struct app_state *app)
                                       (double)(output->captures_completed + output->captures_failed) /
                                       1000000.0
                                   : 0.0;
+    double average_rows_per_capture = output->captures_completed > 0
+                                        ? (double)output->source_rows_captured /
+                                            (double)output->captures_completed
+                                        : 0.0;
+    double capture_rate = average_capture_ms > 0.0 ? 1000.0 / average_capture_ms : 0.0;
+    double estimated_refresh_s = capture_rate > 0.0 && average_rows_per_capture > 0.0
+                                   ? (double)output->ring_row_count /
+                                       (capture_rate * average_rows_per_capture)
+                                   : 0.0;
     fprintf(stderr,
-            "output %s: frames=%llu captures=%llu failed=%llu dropped=%llu avg_render_ms=%.3f avg_capture_ms=%.3f\n",
+            "output %s: frames=%llu captures=%llu rows=%llu failed=%llu dropped=%llu avg_render_ms=%.3f avg_capture_ms=%.3f est_refresh_s=%.3f\n",
             output->name != NULL ? output->name : "(unnamed)",
             (unsigned long long)output->frames_rendered,
             (unsigned long long)output->captures_completed,
+            (unsigned long long)output->source_rows_captured,
             (unsigned long long)output->captures_failed,
             (unsigned long long)output->dropped_frames,
             average_render_ms,
-            average_capture_ms);
+            average_capture_ms,
+            estimated_refresh_s);
   }
 
   double average_render_ms = total_frames > 0
@@ -1122,9 +1190,10 @@ static void print_stats(struct app_state *app)
                                 : 0.0;
 
   fprintf(stderr,
-          "total: frames=%llu captures=%llu failed=%llu dropped=%llu avg_render_ms=%.3f avg_capture_ms=%.3f\n",
+          "total: frames=%llu captures=%llu rows=%llu failed=%llu dropped=%llu avg_render_ms=%.3f avg_capture_ms=%.3f\n",
           (unsigned long long)total_frames,
           (unsigned long long)total_captures,
+          (unsigned long long)total_source_rows,
           (unsigned long long)total_failed,
           (unsigned long long)total_dropped,
           average_render_ms,
@@ -1164,6 +1233,7 @@ int main(int argc, char **argv)
   struct app_state app;
   memset(&app, 0, sizeof(app));
   app.requested_water_height = DEFAULT_WATER_HEIGHT;
+  app.requested_capture_rows = DEFAULT_CAPTURE_ROWS;
   app.running = true;
 
   if (!parse_arguments(&app, argc, argv)) {

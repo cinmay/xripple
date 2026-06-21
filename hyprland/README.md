@@ -51,10 +51,23 @@ Useful options:
 
 ```text
 --water-height N   Height of the ripple band in logical pixels, default 255
+--capture-rows N   Source rows captured per update, default 32, or full
 --max-frames N     Exit after rendering N total frames
 --benchmark        Print benchmark-oriented stats on exit
 --verbose          Print setup and runtime diagnostics
 ```
+
+For responsiveness testing, compare:
+
+```sh
+./hyprland/build/hypripple --benchmark --max-frames 1200 --capture-rows 1 --verbose
+./hyprland/build/hypripple --benchmark --max-frames 1200 --capture-rows 16 --verbose
+./hyprland/build/hypripple --benchmark --max-frames 1200 --capture-rows 32 --verbose
+./hyprland/build/hypripple --benchmark --max-frames 1200 --capture-rows full --verbose
+```
+
+The `est_refresh_s` stat estimates how long it takes to refresh the full source
+band used by the reflection.
 
 Hyprland may require screencopy permission depending on its permissions config.
 If the app starts but captures fail, check the `screencopy` permission for the

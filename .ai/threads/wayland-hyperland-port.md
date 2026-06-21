@@ -338,3 +338,268 @@ Expected result: no long black warm-up strip; it should render populated water i
 Time: 2026-06-21 17:33:14
 --- Next Prompt ---
 
+ xripple git:(wayland-hyprland-port) ✗ ./hyprland/build/hypripple --benchmark --max-frames 600 --verbose
+configured output eDP-1 surface 1920x255, mode 3840x2400, estimated logical height 1200, source ring rows 510
+capture output eDP-1 logical rows 435..944 of 1200, width 1920
+output eDP-1: frames=600 captures=600 failed=0 dropped=0 avg_render_ms=0.322 avg_capture_ms=25.389
+total: frames=600 captures=600 failed=0 dropped=0 avg_render_ms=0.322 avg_capture_ms=25.389
+
+The prefill works as intended. 
+
+The water effect takes a long time to update when there is a lot of movement on the screen. I suppose this is because of the ring buffer? 
+Let's discuss where to go from here before we start coding again. Please ask any clarifying questions or give any suggestions or thoughts you have about this.
+
+
+Time: 2026-06-21 17:39:18
+--- Codex Run ---
+
+Codex output:
+Yes, the delay is mostly the ring buffer/update policy.
+
+Current numbers:
+
+```text
+ring rows: 510
+avg capture: 25.4 ms
+capture rate: ~39 captures/sec
+rows updated per capture: 1
+full source refresh: 510 / 39 = ~13 seconds
+```
+
+So movement takes a long time to fully enter the reflected source band. Even at perfect 60Hz, one row per frame would still take `510 / 60 = 8.5s`.
+
+The good news: rendering is not the bottleneck. `avg_render_ms=0.322` is excellent. The issue is source freshness.
+
+**Where I’d Go Next**
+I would not jump to a Hyprland plugin yet. This standalone approach is working, and the CPU renderer is cheap. The next experiment should be changing the capture policy.
+
+Best next step: add configurable chunk capture.
+
+Instead of capturing 1 row per frame, capture N rows per frame:
+
+```text
+--capture-rows 1    current behavior
+--capture-rows 8
+--capture-rows 16
+--capture-rows 32
+--capture-rows 64
+--capture-rows full
+```
+
+At your measured capture rate:
+
+```text
+1 row/frame   ~13.0s full refresh
+8 rows/frame  ~1.6s
+16 rows/frame ~0.8s
+32 rows/frame ~0.4s
+64 rows/frame ~0.2s
+```
+
+My guess is `16` or `32` will feel much better without being expensive.
+
+The important detail: screencopy likely has a fixed per-request cost. Capturing 16 rows may not be much slower than capturing 1 row, because the compositor still has to schedule and deliver a screencopy frame either way. We need benchmark data.
+
+**Second Improvement**
+The current loop is serialized:
+
+```text
+frame callback -> screencopy -> render -> commit -> next frame callback
+```
+
+That means rendering is capture-limited. Eventually we should decouple them:
+
+```text
+render every frame callback
+capture source rows asynchronously
+update ring whenever capture returns
+```
+
+That would keep the water motion smooth even if screencopy runs at ~39Hz.
+
+**Not Yet**
+I would not optimize the ripple math, add SIMD, or move rendering to GPU right now. The render time is already tiny. The bottleneck is source update latency.
+
+Clarifying questions:
+
+1. What target responsiveness feels right: reflected movement visible within `250ms`, `500ms`, or `1s`?
+2. Do you want to preserve the original “slow scanning into the water” feel, or should the reflection behave more like a live distorted mirror?
+3. While this was running, did CPU usage feel acceptable?
+4. Should we keep the water height around `255px`, or should that become a serious configurable parameter now?
+
+My recommendation: next code step should be `--capture-rows N` plus stats that report estimated full-source refresh time. Then we benchmark `1, 8, 16, 32, full` on your machine before deciding whether a plugin is necessary.
+
+Time: 2026-06-21 17:39:18
+--- Next Prompt ---
+
+1. I think the responsiveness should be as good as possible. We should base it on what the benchmarks show. Perhaps you are right that size won't affect the performance much.
+2. The closer we can get to a live distorted mirror, the better. But we have to keep performance in mind.
+3. I had a look at btop and hyperripple was nr 3 in the CPU usage list, however it was less than 0.1% of the CPU, This may be acceptable. We should run a longer stress test to see if the cpu temperature increases or not.
+4. Let's make it configurable. However, we should avoid adding to many configuration options. The complexity should stay as low as possible.
+
+
+
+Time: 2026-06-21 18:00:04
+--- Codex Run ---
+
+Codex output:
+I’ll implement one focused change now: make the source update chunk size configurable with `--capture-rows N|full`, defaulting to a more responsive chunk size. I’ll also add benchmark output that estimates how long a full source-band refresh takes, since that is the number we need for tuning.
+The renderer will keep the same water-height option, but source freshness will be controlled by a single new option. A value of `full` will be the stress-test/live-mirror path.
+For stress testing, `--capture-rows full` will capture the whole source band every update. Smaller numeric values let us find a practical default if full-band capture is too expensive.
+I’m changing the steady-state capture path from a single-row copy to a chunk copy. The prefill path stays the same.
+The benchmark counters now count source rows captured as well as capture requests, so we can see whether bigger chunks improve freshness without guessing.
+Next I’m updating the printed stats to report the estimated source refresh time. That is the practical responsiveness metric for this effect.
+The default source update chunk is now 32 rows. That should be much closer to a live mirror while still leaving room to test `full` as the upper bound.
+I’m updating the docs with the benchmark matrix I’d like you to run: numeric chunk sizes plus `full`, keeping configuration surface to one new option.
+Docs are updated. I’m building now to catch any mistakes in the new parsing, chunk copy, and stats code.
+One small cleanup: the steady-state capture enum still says “scanline” even though it can now be a chunk. I’m renaming that for clarity before wrapping up.
+Build passes with the cleanup. The binary is ready for the benchmark runs.
+Implemented the next tuning step.
+
+Changes:
+
+- [hypripple.c](/home/cinmay/Documents/xripple/hyprland/src/hypripple.c): added `--capture-rows N|full`, default `32`.
+- [hypripple.c](/home/cinmay/Documents/xripple/hyprland/src/hypripple.c): steady-state capture now updates row chunks instead of one row.
+- [hypripple.c](/home/cinmay/Documents/xripple/hyprland/src/hypripple.c): benchmark stats now include captured source rows and `est_refresh_s`.
+- [README.md](/home/cinmay/Documents/xripple/hyprland/README.md) and [DESIGN.md](/home/cinmay/Documents/xripple/hyprland/DESIGN.md): updated with the new benchmark path.
+
+Build passes:
+
+```sh
+make -C hyprland
+```
+
+Suggested benchmark matrix:
+
+```sh
+./hyprland/build/hypripple --benchmark --max-frames 1200 --capture-rows 1 --verbose
+./hyprland/build/hypripple --benchmark --max-frames 1200 --capture-rows 16 --verbose
+./hyprland/build/hypripple --benchmark --max-frames 1200 --capture-rows 32 --verbose
+./hyprland/build/hypripple --benchmark --max-frames 1200 --capture-rows full --verbose
+```
+
+For a longer thermal check:
+
+```sh
+./hyprland/build/hypripple --benchmark --max-frames 12000 --capture-rows full --verbose
+```
+
+The important numbers now are `avg_capture_ms`, `avg_render_ms`, and `est_refresh_s`. If `full` keeps CPU/temp acceptable, that gets us closest to the live distorted mirror behavior.
+
+Time: 2026-06-21 18:00:04
+--- Next Prompt ---
+Here is the output. Let's discuss the results before we conclude coding. 
+
+ xripple git:(wayland-hyprland-port) ✗ ./hyprland/build/hypripple --benchmark --max-frames 1200 --capture-rows 1 --verbose
+
+configured output eDP-1 surface 1920x255, mode 3840x2400, estimated logical height 1200, source ring rows 510
+capture output eDP-1 logical rows 435..944 of 1200, width 1920
+output eDP-1: frames=1200 captures=1200 rows=3418 failed=0 dropped=0 avg_render_ms=0.325 avg_capture_ms=25.050 est_refresh_s=4.485
+total: frames=1200 captures=1200 rows=3418 failed=0 dropped=0 avg_render_ms=0.325 avg_capture_ms=25.050
+
+
+xripple git:(wayland-hyprland-port) ✗ ./hyprland/build/hypripple --benchmark --max-frames 1200 --capture-rows 16 --verbose
+
+configured output eDP-1 surface 1920x255, mode 3840x2400, estimated logical height 1200, source ring rows 510
+capture output eDP-1 logical rows 435..944 of 1200, width 1920
+output eDP-1: frames=1200 captures=1200 rows=39388 failed=0 dropped=0 avg_render_ms=0.329 avg_capture_ms=25.349 est_refresh_s=0.394
+total: frames=1200 captures=1200 rows=39388 failed=0 dropped=0 avg_render_ms=0.329 avg_capture_ms=25.349
+
+
+xripple git:(wayland-hyprland-port) ✗ ./hyprland/build/hypripple --benchmark --max-frames 1200 --capture-rows 32 --verbose
+
+configured output eDP-1 surface 1920x255, mode 3840x2400, estimated logical height 1200, source ring rows 510
+capture output eDP-1 logical rows 435..944 of 1200, width 1920
+output eDP-1: frames=1200 captures=1200 rows=77756 failed=0 dropped=0 avg_render_ms=0.322 avg_capture_ms=25.225 est_refresh_s=0.199
+total: frames=1200 captures=1200 rows=77756 failed=0 dropped=0 avg_render_ms=0.322 avg_capture_ms=25.225
+
+
+xripple git:(wayland-hyprland-port) ✗ ./hyprland/build/hypripple --benchmark --max-frames 1200 --capture-rows full --verbose
+configured output eDP-1 surface 1920x255, mode 3840x2400, estimated logical height 1200, source ring rows 510
+capture output eDP-1 logical rows 435..944 of 1200, width 1920
+output eDP-1: frames=1200 captures=1200 rows=1224000 failed=0 dropped=0 avg_render_ms=0.286 avg_capture_ms=28.695 est_refresh_s=0.014
+total: frames=1200 captures=1200 rows=1224000 failed=0 dropped=0 avg_render_ms=0.286 avg_capture_ms=28.695
+
+
+Time: 2026-06-21 18:09:27
+--- Codex Run ---
+
+Codex output:
+These results are good, but they also expose one scale bug we should fix before trusting the benchmark fully.
+
+**What The Numbers Say**
+Capture size barely affects latency:
+
+```text
+1 row    avg_capture_ms=25.050
+16 rows  avg_capture_ms=25.349
+32 rows  avg_capture_ms=25.225
+full     avg_capture_ms=28.695
+```
+
+That confirms the suspicion: screencopy has a large fixed per-request cost. Capturing more rows is almost free until we get to full-band capture, and even full only adds ~3.6ms.
+
+Rendering is still not the bottleneck:
+
+```text
+avg_render_ms ~= 0.29-0.33ms
+```
+
+So the standalone approach still looks viable.
+
+**Important Scale Issue**
+Your monitor is scaled:
+
+```text
+surface 1920x255
+mode 3840x2400
+estimated logical height 1200
+```
+
+The screencopy buffer is likely coming back at physical scale, so when we request 32 logical rows, Hyprland returns 64 physical rows. That explains why `rows=` is roughly doubled.
+
+That means the current code is probably copying physical capture rows/columns directly into a logical ring buffer. On a 2x-scaled output, it may be sampling only the first half of the physical capture area instead of properly downsampling the full capture into logical coordinates.
+
+So: the performance trend is useful, but the visual mapping and `est_refresh_s` are not fully trustworthy yet.
+
+**My Recommendation**
+Before choosing defaults, fix capture scaling.
+
+Keep the renderer logical-size for now, but downsample the screencopy buffer into the logical ring buffer:
+
+```text
+physical capture buffer -> logical ripple ring
+```
+
+For scale 2, that means:
+
+```text
+2 physical columns -> 1 logical column
+2 physical rows    -> 1 logical row
+```
+
+That keeps CPU/render cost low and makes the reflection cover the correct full width/height.
+
+After that, rerun:
+
+```sh
+--capture-rows 16
+--capture-rows 32
+--capture-rows full
+```
+
+I expect the result will still point toward `full` or `32` as the right default.
+
+**Likely Default**
+If scale-corrected `full` remains stable, I’d make `full` the default because your goal is a live distorted mirror. If it increases temperature/GPU load too much in a longer run, `32` is the practical fallback.
+
+**Next Things To Decide**
+1. Did `--capture-rows full` look visibly better than `32`?
+2. Did `full` affect CPU/GPU temperature noticeably, even though CPU stayed low?
+3. Did you notice the reflection looking horizontally wrong or only reflecting part of the screen? On this scaled display, I suspect it may currently be doing that.
+
+My suggested next coding step: fix scale-aware capture mapping and corrected stats, then repeat the benchmark matrix.
+
+Time: 2026-06-21 18:09:27
+--- Next Prompt ---
+
