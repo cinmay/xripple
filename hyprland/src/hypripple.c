@@ -84,6 +84,7 @@ struct output_state {
   bool configured;
   bool capture_in_flight;
   bool closed;
+  bool logged_capture_geometry;
 
   double vertical_phase;
   double horizontal_phase;
@@ -367,6 +368,25 @@ static void free_output(struct output_state *output)
   free(output);
 }
 
+static int estimate_output_logical_height(struct output_state *output)
+{
+  if (output->mode_width > 0 && output->mode_height > 0 && output->surface_width > 0) {
+    double width_scale = (double)output->mode_width / (double)output->surface_width;
+    if (width_scale > 0.0) {
+      int logical_height = (int)llround((double)output->mode_height / width_scale);
+      if (logical_height > 0) {
+        return logical_height;
+      }
+    }
+  }
+
+  if (output->mode_height > 0 && output->scale > 0) {
+    return output->mode_height / output->scale;
+  }
+
+  return output->mode_height;
+}
+
 static bool ensure_output_storage(struct output_state *output, int width, int height)
 {
   if (width <= 0 || height <= 0) {
@@ -398,11 +418,15 @@ static bool ensure_output_storage(struct output_state *output, int width, int he
   }
 
   if (output->app->verbose) {
+    int logical_height = estimate_output_logical_height(output);
     fprintf(stderr,
-            "configured output %s surface %dx%d, source ring rows %d\n",
+            "configured output %s surface %dx%d, mode %dx%d, estimated logical height %d, source ring rows %d\n",
             output->name != NULL ? output->name : "(unnamed)",
             output->surface_width,
             output->surface_height,
+            output->mode_width,
+            output->mode_height,
+            logical_height,
             output->ring_row_count);
   }
 
@@ -710,18 +734,35 @@ static void request_capture(struct output_state *output)
     return;
   }
 
+  int logical_height = estimate_output_logical_height(output);
+  if (logical_height <= 0) {
+    free(capture);
+    render_ripple(output);
+    return;
+  }
+
   int source_band_height = output->surface_height * 2;
-  int source_top = output->mode_height - output->surface_height * 3;
+  int source_top = logical_height - output->surface_height * 3;
   if (source_top < 0) {
     source_top = 0;
   }
 
   int source_row = source_top + (output->capture_row_index % source_band_height);
-  source_row = clamp_int(source_row, 0, output->mode_height - 1);
+  source_row = clamp_int(source_row, 0, logical_height - 1);
 
   int capture_width = output->surface_width;
-  if (capture_width > output->mode_width) {
-    capture_width = output->mode_width;
+
+  if (output->app->verbose && !output->logged_capture_geometry) {
+    int source_bottom = source_top + source_band_height - 1;
+    source_bottom = clamp_int(source_bottom, 0, logical_height - 1);
+    fprintf(stderr,
+            "capture output %s logical rows %d..%d of %d, width %d\n",
+            output->name != NULL ? output->name : "(unnamed)",
+            source_top,
+            source_bottom,
+            logical_height,
+            capture_width);
+    output->logged_capture_geometry = true;
   }
 
   clock_gettime(CLOCK_MONOTONIC, &capture->started_at);

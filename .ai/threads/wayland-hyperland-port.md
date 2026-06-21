@@ -231,5 +231,66 @@ If captures fail at runtime, the likely first thing to check is Hyprland’s `sc
 Time: 2026-06-21 17:08:37
 --- Next Prompt ---
 
-Ok, whats the command for building and running the hyprland version?
+It renders a black strip at the bottom of the screen.
+
+ xripple git:(wayland-hyprland-port) ./hyprland/build/hypripple --benchmark --max-frames 600 --verbose
+configured output eDP-1 surface 1920x255, source ring rows 510
+output eDP-1: frames=600 captures=600 failed=0 dropped=0 avg_render_ms=0.328 avg_capture_ms=25.985
+total: frames=600 captures=600 failed=0 dropped=0 avg_render_ms=0.328 avg_capture_ms=25.985
+
+
+Time: 2026-06-21 17:23:27
+--- Codex Run ---
+
+Codex output:
+That black strip is useful signal: captures are succeeding, but the source coordinates are almost certainly wrong on your scaled eDP output. `wlr-screencopy` regions are in output logical coordinates, while the prototype used `wl_output` mode height, which is usually physical pixels. On a 2880x1800 panel scaled to 1920x1200, that puts the capture inside/outside the water strip instead of above it. I’m fixing the coordinate calculation now.
+The log confirms this is a scaled output case: the surface is 1920 wide, but the mode height used for capture is likely larger than the logical coordinate space. I’m replacing those mode-height capture coordinates with an estimated logical height derived from mode width vs layer surface width.
+The fix builds. It now logs both the raw mode and the estimated logical height so we can verify the coordinate math against your next run.
+I’m adding one more verbose line for the first capture geometry, so if it still renders black we can immediately see which logical rows it is sampling.
+Fixed the likely cause.
+
+Your log shows a scaled output: layer surface width is `1920`, but `wl_output` mode is probably physical pixels. `wlr-screencopy` capture regions use **logical output coordinates**, so the prototype was sampling too low, likely inside the black water strip or outside the useful source area.
+
+Changed [hypripple.c](/home/cinmay/Documents/xripple/hyprland/src/hypripple.c) to estimate logical output height from:
+
+```text
+logical_height = mode_height / (mode_width / surface_width)
+```
+
+It now also logs the capture row range in verbose mode.
+
+Rebuilt successfully with:
+
+```sh
+make -C hyprland
+```
+
+Please rerun:
+
+```sh
+./hyprland/build/hypripple --benchmark --max-frames 600 --verbose
+```
+
+On a 2880x1800 panel scaled to 1920x1200, the new log should look roughly like:
+
+```text
+configured output eDP-1 surface 1920x255, mode 2880x1800, estimated logical height 1200
+capture output eDP-1 logical rows 435..944 of 1200, width 1920
+```
+
+If it is still black, send that new verbose output; the next thing to inspect is captured pixel content/format.
+
+text
+2026-06-21T15:22:23.884582Z ERROR codex_core::tools::router: error=apply_patch verification failed: Failed to find expected lines in /home/cinmay/Documents/xripple/hyprland/src/hypripple.c:
+  if (output->app->verbose) {
+    fprintf(stderr,
+            "configured output %s surface %dx%d, source ring rows %d\n",
+            output->name != NULL ? output->name : "(unnamed)",
+            output->surface_width,
+            output->surface_height,
+            output->ring_row_count);
+  }
+
+Time: 2026-06-21 17:23:27
+--- Next Prompt ---
 
