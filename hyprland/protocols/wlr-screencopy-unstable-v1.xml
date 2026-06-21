@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="wlr_screencopy_unstable_v1">
+  <copyright>
+    Copyright © 2018 Simon Ser
+    Copyright © 2019 Purism SPC
+
+    Permission to use, copy, modify, distribute, and sell this software and its
+    documentation for any purpose is hereby granted without fee, provided that
+    the above copyright notice appear in all copies and that both that
+    copyright notice and this permission notice appear in supporting
+    documentation, and that the name of the copyright holders not be used in
+    advertising or publicity pertaining to distribution of the software without
+    specific, written prior permission. The copyright holders make no
+    representations about the suitability of this software for any purpose. It
+    is provided "as is" without express or implied warranty.
+
+    THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
+    INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO
+    EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY SPECIAL, INDIRECT OR
+    CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF
+    USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+    TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+    PERFORMANCE OF THIS SOFTWARE.
+  </copyright>
+
+  <interface name="zwlr_screencopy_manager_v1" version="3">
+    <description summary="screenshooter">
+      This object is used by clients to request screenshots.
+    </description>
+
+    <request name="capture_output">
+      <description summary="capture an output">
+        Capture the next frame of an entire output.
+      </description>
+      <arg name="frame" type="new_id" interface="zwlr_screencopy_frame_v1"/>
+      <arg name="overlay_cursor" type="int"/>
+      <arg name="output" type="object" interface="wl_output"/>
+    </request>
+
+    <request name="capture_output_region">
+      <description summary="capture an output region">
+        Capture the next frame of an output region.
+      </description>
+      <arg name="frame" type="new_id" interface="zwlr_screencopy_frame_v1"/>
+      <arg name="overlay_cursor" type="int"/>
+      <arg name="output" type="object" interface="wl_output"/>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the manager"/>
+    </request>
+  </interface>
+
+  <interface name="zwlr_screencopy_frame_v1" version="3">
+    <description summary="screencopy frame">
+      This object represents a single pending frame.
+    </description>
+
+    <request name="copy">
+      <description summary="copy the frame">
+        Copy the frame to the supplied buffer.
+      </description>
+      <arg name="buffer" type="object" interface="wl_buffer"/>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="delete this object"/>
+    </request>
+
+    <event name="buffer">
+      <description summary="buffer information">
+        Provides the client with the preferred wl_shm buffer parameters.
+      </description>
+      <arg name="format" type="uint"/>
+      <arg name="width" type="uint"/>
+      <arg name="height" type="uint"/>
+      <arg name="stride" type="uint"/>
+    </event>
+
+    <event name="flags">
+      <description summary="frame flags">
+        Provides flags about the frame.
+      </description>
+      <arg name="flags" type="uint" enum="flags"/>
+    </event>
+
+    <event name="ready">
+      <description summary="frame is available for reading">
+        Called when the frame is copied and ready.
+      </description>
+      <arg name="tv_sec_hi" type="uint"/>
+      <arg name="tv_sec_lo" type="uint"/>
+      <arg name="tv_nsec" type="uint"/>
+    </event>
+
+    <event name="failed">
+      <description summary="frame copy failed"/>
+    </event>
+
+    <request name="copy_with_damage" since="2">
+      <description summary="copy the frame when it changes">
+        Copy the frame to the supplied buffer and report damage.
+      </description>
+      <arg name="buffer" type="object" interface="wl_buffer"/>
+    </request>
+
+    <event name="damage" since="2">
+      <description summary="damage since last frame">
+        Provides the damaged region in buffer coordinates.
+      </description>
+      <arg name="x" type="uint"/>
+      <arg name="y" type="uint"/>
+      <arg name="width" type="uint"/>
+      <arg name="height" type="uint"/>
+    </event>
+
+    <event name="linux_dmabuf" since="3">
+      <description summary="linux-dmabuf buffer information">
+        Provides the client with linux-dmabuf buffer parameters.
+      </description>
+      <arg name="format" type="uint"/>
+      <arg name="width" type="uint"/>
+      <arg name="height" type="uint"/>
+    </event>
+
+    <event name="buffer_done" since="3">
+      <description summary="all buffer information has been sent">
+        This event is sent once after all buffer and linux_dmabuf events.
+      </description>
+    </event>
+
+    <enum name="error">
+      <entry name="already_used" value="0"/>
+      <entry name="invalid_buffer" value="1"/>
+    </enum>
+
+    <enum name="flags" bitfield="true">
+      <entry name="y_invert" value="1"/>
+    </enum>
+  </interface>
+</protocol>
