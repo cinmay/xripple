@@ -25,6 +25,11 @@ The first implementation is a standalone Hyprland/Wayland client:
 This keeps the app layered over the existing wallpaper while staying below
 normal windows.
 
+Screencopy regions are requested in logical output coordinates, but the returned
+buffer may be in physical pixels on scaled outputs. The prototype stores the
+requested logical capture size with every frame and downsamples the returned
+buffer into the logical ripple ring.
+
 ## Why Screencopy First
 
 The original X11 program samples the visible desktop and writes a distorted

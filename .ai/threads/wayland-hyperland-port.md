@@ -603,3 +603,130 @@ My suggested next coding step: fix scale-aware capture mapping and corrected sta
 Time: 2026-06-21 18:09:27
 --- Next Prompt ---
 
+1. Yes, the `full` capture looked better than `32`. However there is something nice about the ripple effect gradually updating.
+2. When hyperripple is running GPU1 goes from around 5% to around 45% regardless of the capture size. The CPU works harder on full, but it's still around 0.1% 
+3. Yes, the reflection was horizontally wrong. And the fist part of the reflection is slow to update. I think your theory about the scaling is correct.
+
+Time: 2026-06-21 18:20:28
+--- Codex Run ---
+
+Codex output:
+The horizontal mismatch confirms the scaling issue. I’m going to fix capture-to-ring mapping now: screencopy can return physical-size buffers, and we need to downsample those into the logical ripple ring instead of copying the first physical rows/columns directly.
+I’m keeping rendering at logical resolution for this pass. That fixes correctness with minimal cost; we can consider physical-resolution rendering later if the scaled result looks too soft.
+Each capture now records both sizes: what we requested in logical coordinates and what the compositor returned in the buffer. The copy path will use that ratio.
+The next edit changes the row copy from a raw copy to a scaled sample across the full returned capture buffer. That should fix the reflection only showing part of the screen.
+Captured-row stats will now count logical source rows, not physical buffer rows. That will make `est_refresh_s` meaningful again on scaled monitors.
+I’m adding one verbose line for the first returned capture buffer dimensions so your next run can confirm the compositor is returning `3840x...` for a `1920x...` logical request.
+The scaling fix is in. I’m building now; if this passes, the next benchmark should tell us both visual correctness and the real refresh-time numbers.
+Build passes. I’m updating the design note with the scale-aware capture mapping so the rationale is recorded.
+The note now documents why we downsample the returned screencopy buffer. The rebuilt binary is ready for your next run.
+Fixed the scale mapping.
+
+The code now treats screencopy like this:
+
+```text
+requested logical region: 1920x510
+returned physical buffer: likely 3840x1020
+downsample into logical ripple ring: 1920x510
+```
+
+That should fix the horizontally wrong reflection and the slow/incorrect first portion of the reflected band.
+
+Updated:
+
+- [hypripple.c](/home/cinmay/Documents/xripple/hyprland/src/hypripple.c): stores requested logical capture size per frame.
+- [hypripple.c](/home/cinmay/Documents/xripple/hyprland/src/hypripple.c): downsamples returned physical buffers into the logical ring.
+- [hypripple.c](/home/cinmay/Documents/xripple/hyprland/src/hypripple.c): stats now count logical rows, so `est_refresh_s` should be meaningful.
+- [DESIGN.md](/home/cinmay/Documents/xripple/hyprland/DESIGN.md): documented the scaled-output behavior.
+
+Build passes:
+
+```sh
+make -C hyprland
+```
+
+Please rerun these first:
+
+```sh
+./hyprland/build/hypripple --benchmark --max-frames 1200 --capture-rows 32 --verbose
+./hyprland/build/hypripple --benchmark --max-frames 1200 --capture-rows full --verbose
+```
+
+You should now see a new line like:
+
+```text
+capture buffer output eDP-1 requested 1920x510, returned 3840x1020, stride ...
+```
+
+If the reflection is now horizontally correct, the remaining decision is aesthetic/performance: `full` for the most live mirror feel, or `32` if we want some gradual water-source drift with lower memory traffic.
+
+Time: 2026-06-21 18:20:28
+--- Next Prompt ---
+
+That looked much better. 
+
+
+xripple git:(wayland-hyprland-port) ✗ ./hyprland/build/hypripple --benchmark --max-frames 1200 --capture-rows 32 --verbose
+
+configured output eDP-1 surface 1920x255, mode 3840x2400, estimated logical height 1200, source ring rows 510
+capture output eDP-1 logical rows 435..944 of 1200, width 1920
+capture buffer output eDP-1 requested 1920x510, returned 3840x1020, stride 15360
+output eDP-1: frames=1200 captures=1200 rows=38730 failed=0 dropped=0 avg_render_ms=0.321 avg_capture_ms=24.833 est_refresh_s=0.392
+total: frames=1200 captures=1200 rows=38730 failed=0 dropped=0 avg_render_ms=0.321 avg_capture_ms=24.833
+➜  xripple git:(wayland-hyprland-port) ✗ ./hyprland/build/hypripple --benchmark --max-frames 1200 --capture-rows full --verbose
+
+configured output eDP-1 surface 1920x255, mode 3840x2400, estimated logical height 1200, source ring rows 510
+capture output eDP-1 logical rows 435..944 of 1200, width 1920
+capture buffer output eDP-1 requested 1920x510, returned 3840x1020, stride 15360
+output eDP-1: frames=1200 captures=1200 rows=612000 failed=0 dropped=0 avg_render_ms=0.297 avg_capture_ms=28.930 est_refresh_s=0.029
+total: frames=1200 captures=1200 rows=612000 failed=0 dropped=0 avg_render_ms=0.297 avg_capture_ms=28.930
+
+Time: 2026-06-21 18:23:51
+--- Codex Run ---
+
+Codex output:
+These results are strong.
+
+The scale fix is confirmed:
+
+```text
+requested 1920x510, returned 3840x1020
+```
+
+So Hyprland is returning a 2x physical buffer, and we’re now mapping it correctly back into the logical ripple ring.
+
+The important comparison:
+
+```text
+32 rows: avg_capture_ms=24.833, est_refresh_s=0.392
+full:    avg_capture_ms=28.930, est_refresh_s=0.029
+```
+
+`full` costs only ~4ms more per capture, while making the reflection effectively live. Since you also saw that GPU usage was about the same regardless of capture size, `full` is currently the best candidate for the “live distorted mirror” goal.
+
+The remaining tradeoff is frame pacing. The app is still serialized:
+
+```text
+capture -> render -> commit -> next capture
+```
+
+So `full` gives fresher reflection, but caps the whole animation around `1000 / 28.9 ~= 35 FPS`. `32` is closer to `40 FPS` and has a bit of that gradual-update character.
+
+My suggested next decision:
+
+1. Keep `--capture-rows` as the single tuning knob.
+2. For now, leave default at `32` until we run a longer thermal test.
+3. If `full` stays thermally acceptable, make `full` the default.
+4. After that, consider decoupling render from capture so the water animation can run at compositor frame rate while captures update asynchronously.
+
+For stress testing full capture:
+
+```sh
+./hyprland/build/hypripple --benchmark --max-frames 24000 --capture-rows full --verbose
+```
+
+That should run roughly 11-12 minutes on your current timings. Watch GPU usage, GPU temperature, fan behavior, and whether desktop interaction feels worse.
+
+Time: 2026-06-21 18:23:51
+--- Next Prompt ---
+

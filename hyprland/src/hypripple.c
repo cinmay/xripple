@@ -61,6 +61,8 @@ struct capture_frame {
   int height;
   int stride;
   int ring_row_index;
+  int requested_width;
+  int requested_height;
   bool has_shm_format;
   bool copy_started;
   struct timespec started_at;
@@ -93,6 +95,7 @@ struct output_state {
   bool capture_in_flight;
   bool closed;
   bool logged_capture_geometry;
+  bool logged_capture_buffer;
   bool prefilled;
 
   double vertical_phase;
@@ -580,28 +583,36 @@ static int configured_capture_rows(struct output_state *output, int source_heigh
   return requested_rows;
 }
 
-static void copy_row_to_ring(struct output_state *output,
-                             int destination_row,
-                             const uint32_t *source_row,
-                             int source_width)
+static int scaled_index(int logical_index, int logical_count, int physical_count)
+{
+  if (logical_count <= 0 || physical_count <= 0) {
+    return 0;
+  }
+
+  int physical_index = (int)(((int64_t)logical_index * (int64_t)physical_count) /
+                             (int64_t)logical_count);
+  return clamp_int(physical_index, 0, physical_count - 1);
+}
+
+static void copy_scaled_row_to_ring(struct output_state *output,
+                                    int destination_row,
+                                    const uint32_t *source_row,
+                                    int source_width)
 {
   if (output->ring_pixels == NULL || source_row == NULL || output->surface_width <= 0 ||
       destination_row < 0 || destination_row >= output->ring_row_count) {
     return;
   }
 
-  int copy_width = source_width < output->surface_width ? source_width : output->surface_width;
-  if (copy_width <= 0) {
+  if (source_width <= 0) {
     return;
   }
 
   uint32_t *destination_pixels = output->ring_pixels + (size_t)destination_row * (size_t)output->surface_width;
 
-  for (int x = 0; x < copy_width; x++) {
-    destination_pixels[x] = source_row[x] | 0xff000000u;
-  }
-  for (int x = copy_width; x < output->surface_width; x++) {
-    destination_pixels[x] = destination_pixels[copy_width - 1];
+  for (int x = 0; x < output->surface_width; x++) {
+    int source_x = scaled_index(x, output->surface_width, source_width);
+    destination_pixels[x] = source_row[source_x] | 0xff000000u;
   }
 }
 
@@ -613,10 +624,13 @@ static void copy_capture_to_ring(struct capture_frame *capture)
   }
 
   if (capture->kind == CAPTURE_KIND_PREFILL) {
-    int rows_to_copy = capture->height < output->ring_row_count ? capture->height : output->ring_row_count;
+    int rows_to_copy = capture->requested_height < output->ring_row_count
+                         ? capture->requested_height
+                         : output->ring_row_count;
     for (int row = 0; row < rows_to_copy; row++) {
-      uint8_t *source_bytes = (uint8_t *)capture->buffer.data + (size_t)row * (size_t)capture->buffer.stride;
-      copy_row_to_ring(output, row, (const uint32_t *)source_bytes, capture->width);
+      int source_y = scaled_index(row, capture->requested_height, capture->height);
+      uint8_t *source_bytes = (uint8_t *)capture->buffer.data + (size_t)source_y * (size_t)capture->buffer.stride;
+      copy_scaled_row_to_ring(output, row, (const uint32_t *)source_bytes, capture->width);
     }
 
     if (rows_to_copy > 0 && rows_to_copy < output->ring_row_count) {
@@ -632,18 +646,19 @@ static void copy_capture_to_ring(struct capture_frame *capture)
     return;
   }
 
-  int rows_to_copy = capture->height;
+  int rows_to_copy = capture->requested_height;
   int rows_until_ring_end = output->ring_row_count - capture->ring_row_index;
   if (rows_to_copy > rows_until_ring_end) {
     rows_to_copy = rows_until_ring_end;
   }
 
   for (int row = 0; row < rows_to_copy; row++) {
-    uint8_t *source_bytes = (uint8_t *)capture->buffer.data + (size_t)row * (size_t)capture->buffer.stride;
-    copy_row_to_ring(output,
-                     capture->ring_row_index + row,
-                     (const uint32_t *)source_bytes,
-                     capture->width);
+    int source_y = scaled_index(row, capture->requested_height, capture->height);
+    uint8_t *source_bytes = (uint8_t *)capture->buffer.data + (size_t)source_y * (size_t)capture->buffer.stride;
+    copy_scaled_row_to_ring(output,
+                            capture->ring_row_index + row,
+                            (const uint32_t *)source_bytes,
+                            capture->width);
   }
 
   output->capture_row_index = (capture->ring_row_index + rows_to_copy) % output->ring_row_count;
@@ -698,6 +713,18 @@ static void capture_handle_buffer(void *data,
   capture->stride = (int)stride;
   capture->has_shm_format = true;
 
+  if (capture->output->app->verbose && !capture->output->logged_capture_buffer) {
+    fprintf(stderr,
+            "capture buffer output %s requested %dx%d, returned %dx%d, stride %d\n",
+            capture->output->name != NULL ? capture->output->name : "(unnamed)",
+            capture->requested_width,
+            capture->requested_height,
+            capture->width,
+            capture->height,
+            capture->stride);
+    capture->output->logged_capture_buffer = true;
+  }
+
   if (capture->output->app->screencopy_version < 3) {
     start_capture_copy(capture);
   }
@@ -726,7 +753,7 @@ static void capture_handle_ready(void *data,
   struct capture_frame *capture = data;
   struct output_state *output = capture->output;
   output->captures_completed++;
-  output->source_rows_captured += (uint64_t)capture->height;
+  output->source_rows_captured += (uint64_t)capture->requested_height;
   output->total_capture_ns += elapsed_ns_since(capture->started_at);
   output->capture_in_flight = false;
 
@@ -854,6 +881,8 @@ static bool begin_capture_region(struct output_state *output,
   capture->output = output;
   capture->kind = kind;
   capture->ring_row_index = ring_row_index;
+  capture->requested_width = capture_width;
+  capture->requested_height = capture_height;
   capture->frame = zwlr_screencopy_manager_v1_capture_output_region(output->app->screencopy_manager,
                                                                      0,
                                                                      output->output,
