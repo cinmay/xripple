@@ -15,10 +15,12 @@ The first implementation is a standalone Hyprland/Wayland client:
 2. Create one layer-shell surface per output.
 3. Place each surface on the `bottom` layer, anchored left/right/bottom, with no
    exclusive zone and an empty input region.
-4. After every frame callback, request a screencopy of one scanline from the
-   source band above the water.
-5. Store captured scanlines in a two-water-height ring buffer.
-6. Render the ripple strip into a double-buffered SHM surface.
+4. Before the first visible frame, prefill the two-water-height source ring with
+   one screencopy of the whole source band above the water.
+5. After every later frame callback, request a screencopy of one scanline from
+   the same source band.
+6. Store captured scanlines in the ring buffer.
+7. Render the ripple strip into a double-buffered SHM surface.
 
 This keeps the app layered over the existing wallpaper while staying below
 normal windows.
@@ -31,9 +33,10 @@ version into the root window. The closest standalone Wayland equivalent is:
 - capture a small region of the final output
 - draw the distorted result into a layer surface
 
-Capturing only one scanline per frame keeps bandwidth low. At 3840 pixels wide,
-one XRGB scanline is about 15 KiB. The larger cost is rendering and submitting
-the water strip, roughly:
+The startup prefill avoids a black warm-up band. After that, capturing only one
+scanline per frame keeps bandwidth low. At 3840 pixels wide, one XRGB scanline
+is about 15 KiB. The larger cost is rendering and submitting the water strip,
+roughly:
 
 ```text
 3840 * 255 * 4 * 60 = ~235 MiB/s

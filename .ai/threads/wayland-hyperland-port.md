@@ -294,3 +294,47 @@ text
 Time: 2026-06-21 17:23:27
 --- Next Prompt ---
 
+Now, it first renders a black strip for the first about 260 frames. Then the water strip starts at the bottom and gradually moves up until it works as intended. 
+
+
+./hyprland/build/hypripple --benchmark --max-frames 600 --verbose
+configured output eDP-1 surface 1920x255, mode 3840x2400, estimated logical height 1200, source ring rows 510
+capture output eDP-1 logical rows 435..944 of 1200, width 1920
+output eDP-1: frames=600 captures=600 failed=0 dropped=0 avg_render_ms=0.320 avg_capture_ms=25.404
+total: frames=600 captures=600 failed=0 dropped=0 avg_render_ms=0.320 avg_capture_ms=25.404
+
+Time: 2026-06-21 17:33:14
+--- Codex Run ---
+
+Codex output:
+That behavior is the expected consequence of sampling one row per frame with an empty ring buffer: the effect needs about `water_height` frames before the rows it reads stop being zero. I’m going to prefill the full source band with one screencopy before the surface is first shown, then switch back to one-row-per-frame updates.
+The code now has two capture modes: startup prefill copies the whole source band into the ring buffer, and steady-state capture resumes the original one-scanline update pattern.
+Startup should no longer attach a blank buffer. The surface now waits for the prefill capture, renders from populated source rows, then commits the first visible frame.
+The build passes. I’m updating the short design note to reflect the new startup prefill step, since that is now part of the intended architecture rather than a temporary workaround.
+The design doc matches the implementation now. The rebuilt binary is still present, so you can rerun the same benchmark command directly.
+Fixed that startup behavior.
+
+The cause was the empty ring buffer: the renderer was correctly reading rows that had not been captured yet, so the first ~255 frames were black. I changed startup to prefill the full source band once before committing the first visible frame, then it switches back to the original one-scanline-per-frame update pattern.
+
+Updated:
+
+- [hypripple.c](/home/cinmay/Documents/xripple/hyprland/src/hypripple.c): added prefill capture mode.
+- [DESIGN.md](/home/cinmay/Documents/xripple/hyprland/DESIGN.md): documented the prefill step.
+
+Build passes:
+
+```sh
+make -C hyprland
+```
+
+Please rerun the same command:
+
+```sh
+./hyprland/build/hypripple --benchmark --max-frames 600 --verbose
+```
+
+Expected result: no long black warm-up strip; it should render populated water immediately, then continue updating live.
+
+Time: 2026-06-21 17:33:14
+--- Next Prompt ---
+

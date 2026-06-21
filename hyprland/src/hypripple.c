@@ -34,6 +34,11 @@
 struct app_state;
 struct output_state;
 
+enum capture_kind {
+  CAPTURE_KIND_SCANLINE,
+  CAPTURE_KIND_PREFILL,
+};
+
 struct shared_buffer {
   struct wl_buffer *buffer;
   void *data;
@@ -49,10 +54,12 @@ struct capture_frame {
   struct output_state *output;
   struct zwlr_screencopy_frame_v1 *frame;
   struct shared_buffer buffer;
+  enum capture_kind kind;
   uint32_t format;
   int width;
   int height;
   int stride;
+  int ring_row_index;
   bool has_shm_format;
   bool copy_started;
   struct timespec started_at;
@@ -85,6 +92,7 @@ struct output_state {
   bool capture_in_flight;
   bool closed;
   bool logged_capture_geometry;
+  bool prefilled;
 
   double vertical_phase;
   double horizontal_phase;
@@ -543,22 +551,22 @@ static bool capture_format_is_supported(uint32_t format)
   return format == WL_SHM_FORMAT_XRGB8888 || format == WL_SHM_FORMAT_ARGB8888;
 }
 
-static void copy_capture_to_ring(struct capture_frame *capture)
+static void copy_row_to_ring(struct output_state *output,
+                             int destination_row,
+                             const uint32_t *source_row,
+                             int source_width)
 {
-  struct output_state *output = capture->output;
-  if (output->ring_pixels == NULL || capture->buffer.data == NULL || output->surface_width <= 0) {
+  if (output->ring_pixels == NULL || source_row == NULL || output->surface_width <= 0 ||
+      destination_row < 0 || destination_row >= output->ring_row_count) {
     return;
   }
 
-  int copy_width = capture->width < output->surface_width ? capture->width : output->surface_width;
+  int copy_width = source_width < output->surface_width ? source_width : output->surface_width;
   if (copy_width <= 0) {
     return;
   }
 
-  uint8_t *source_bytes = capture->buffer.data;
-  const uint32_t *source_row = (const uint32_t *)source_bytes;
-  uint32_t *destination_pixels = output->ring_pixels +
-                                 (size_t)output->capture_row_index * (size_t)output->surface_width;
+  uint32_t *destination_pixels = output->ring_pixels + (size_t)destination_row * (size_t)output->surface_width;
 
   for (int x = 0; x < copy_width; x++) {
     destination_pixels[x] = source_row[x] | 0xff000000u;
@@ -566,6 +574,37 @@ static void copy_capture_to_ring(struct capture_frame *capture)
   for (int x = copy_width; x < output->surface_width; x++) {
     destination_pixels[x] = destination_pixels[copy_width - 1];
   }
+}
+
+static void copy_capture_to_ring(struct capture_frame *capture)
+{
+  struct output_state *output = capture->output;
+  if (output->ring_pixels == NULL || capture->buffer.data == NULL || output->surface_width <= 0) {
+    return;
+  }
+
+  if (capture->kind == CAPTURE_KIND_PREFILL) {
+    int rows_to_copy = capture->height < output->ring_row_count ? capture->height : output->ring_row_count;
+    for (int row = 0; row < rows_to_copy; row++) {
+      uint8_t *source_bytes = (uint8_t *)capture->buffer.data + (size_t)row * (size_t)capture->buffer.stride;
+      copy_row_to_ring(output, row, (const uint32_t *)source_bytes, capture->width);
+    }
+
+    if (rows_to_copy > 0 && rows_to_copy < output->ring_row_count) {
+      uint32_t *last_row = output->ring_pixels + (size_t)(rows_to_copy - 1) * (size_t)output->surface_width;
+      for (int row = rows_to_copy; row < output->ring_row_count; row++) {
+        uint32_t *destination = output->ring_pixels + (size_t)row * (size_t)output->surface_width;
+        memcpy(destination, last_row, (size_t)output->surface_width * sizeof(uint32_t));
+      }
+    }
+
+    output->capture_row_index = 0;
+    output->prefilled = true;
+    return;
+  }
+
+  uint8_t *source_bytes = capture->buffer.data;
+  copy_row_to_ring(output, capture->ring_row_index, (const uint32_t *)source_bytes, capture->width);
 
   output->capture_row_index = (output->capture_row_index + 1) % output->ring_row_count;
 }
@@ -719,42 +758,85 @@ static const struct zwlr_screencopy_frame_v1_listener capture_listener = {
   .buffer_done = capture_handle_buffer_done,
 };
 
-static void request_capture(struct output_state *output)
+static bool compute_capture_geometry(struct output_state *output,
+                                     int *out_source_top,
+                                     int *out_source_height,
+                                     int *out_capture_width,
+                                     int *out_logical_height)
 {
-  if (output->capture_in_flight || output->app->screencopy_manager == NULL ||
-      output->output == NULL || output->mode_width <= 0 || output->mode_height <= 0 ||
-      output->surface_width <= 0 || output->surface_height <= 0) {
-    return;
-  }
-
-  struct capture_frame *capture = calloc(1, sizeof(*capture));
-  if (capture == NULL) {
-    perror("allocate capture frame");
-    render_ripple(output);
-    return;
-  }
-
   int logical_height = estimate_output_logical_height(output);
   if (logical_height <= 0) {
-    free(capture);
-    render_ripple(output);
-    return;
+    return false;
   }
 
-  int source_band_height = output->surface_height * 2;
   int source_top = logical_height - output->surface_height * 3;
   if (source_top < 0) {
     source_top = 0;
   }
 
-  int source_row = source_top + (output->capture_row_index % source_band_height);
-  source_row = clamp_int(source_row, 0, logical_height - 1);
+  int source_height = output->ring_row_count;
+  int available_height = logical_height - source_top;
+  if (source_height > available_height) {
+    source_height = available_height;
+  }
+  if (source_height <= 0) {
+    return false;
+  }
 
-  int capture_width = output->surface_width;
+  *out_source_top = source_top;
+  *out_source_height = source_height;
+  *out_capture_width = output->surface_width;
+  *out_logical_height = logical_height;
+  return true;
+}
+
+static bool begin_capture_region(struct output_state *output,
+                                 enum capture_kind kind,
+                                 int ring_row_index,
+                                 int source_y,
+                                 int capture_width,
+                                 int capture_height)
+{
+  if (output->capture_in_flight || output->app->screencopy_manager == NULL ||
+      output->output == NULL || output->mode_width <= 0 || output->mode_height <= 0 ||
+      output->surface_width <= 0 || output->surface_height <= 0) {
+    return false;
+  }
+
+  struct capture_frame *capture = calloc(1, sizeof(*capture));
+  if (capture == NULL) {
+    perror("allocate capture frame");
+    return false;
+  }
+
+  clock_gettime(CLOCK_MONOTONIC, &capture->started_at);
+  capture->output = output;
+  capture->kind = kind;
+  capture->ring_row_index = ring_row_index;
+  capture->frame = zwlr_screencopy_manager_v1_capture_output_region(output->app->screencopy_manager,
+                                                                     0,
+                                                                     output->output,
+                                                                     0,
+                                                                     source_y,
+                                                                     capture_width,
+                                                                     capture_height);
+  zwlr_screencopy_frame_v1_add_listener(capture->frame, &capture_listener, capture);
+  output->capture_in_flight = true;
+  return true;
+}
+
+static bool request_prefill_capture(struct output_state *output)
+{
+  int source_top = 0;
+  int source_height = 0;
+  int capture_width = 0;
+  int logical_height = 0;
+  if (!compute_capture_geometry(output, &source_top, &source_height, &capture_width, &logical_height)) {
+    return false;
+  }
 
   if (output->app->verbose && !output->logged_capture_geometry) {
-    int source_bottom = source_top + source_band_height - 1;
-    source_bottom = clamp_int(source_bottom, 0, logical_height - 1);
+    int source_bottom = source_top + source_height - 1;
     fprintf(stderr,
             "capture output %s logical rows %d..%d of %d, width %d\n",
             output->name != NULL ? output->name : "(unnamed)",
@@ -765,17 +847,32 @@ static void request_capture(struct output_state *output)
     output->logged_capture_geometry = true;
   }
 
-  clock_gettime(CLOCK_MONOTONIC, &capture->started_at);
-  capture->output = output;
-  capture->frame = zwlr_screencopy_manager_v1_capture_output_region(output->app->screencopy_manager,
-                                                                     0,
-                                                                     output->output,
-                                                                     0,
-                                                                     source_row,
-                                                                     capture_width,
-                                                                     1);
-  zwlr_screencopy_frame_v1_add_listener(capture->frame, &capture_listener, capture);
-  output->capture_in_flight = true;
+  return begin_capture_region(output, CAPTURE_KIND_PREFILL, 0, source_top, capture_width, source_height);
+}
+
+static void request_capture(struct output_state *output)
+{
+  int source_top = 0;
+  int source_height = 0;
+  int capture_width = 0;
+  int logical_height = 0;
+  if (!compute_capture_geometry(output, &source_top, &source_height, &capture_width, &logical_height)) {
+    render_ripple(output);
+    return;
+  }
+
+  int ring_row_index = output->capture_row_index;
+  int source_row = source_top + (ring_row_index % source_height);
+  source_row = clamp_int(source_row, 0, logical_height - 1);
+
+  if (!begin_capture_region(output,
+                            CAPTURE_KIND_SCANLINE,
+                            ring_row_index,
+                            source_row,
+                            capture_width,
+                            1)) {
+    render_ripple(output);
+  }
 }
 
 static void layer_surface_configure(void *data,
@@ -800,11 +897,11 @@ static void layer_surface_configure(void *data,
 
   output->configured = true;
 
-  struct shared_buffer *buffer = next_render_buffer(output);
-  if (buffer != NULL) {
-    memset(buffer->data, 0, buffer->size);
-    commit_render_buffer(output, buffer);
+  if (!output->prefilled && request_prefill_capture(output)) {
+    return;
   }
+
+  render_ripple(output);
 }
 
 static void layer_surface_closed(void *data, struct zwlr_layer_surface_v1 *layer_surface)
